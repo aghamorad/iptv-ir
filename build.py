@@ -15,6 +15,15 @@ usable on a TV box as shipped, though:
 This rebuilds the list: known-dead entries are repointed at a working host or
 dropped, survivors are renumbered 1..N in the source's own order, and each one
 is checked by pulling a real media segment. `ir.m3u` is the result.
+
+Two checks exist because two different things silently pass for a working
+stream. A 200 on a master manifest proves nothing: `live.presstv.co.uk` answers
+200 with a valid `#EXTM3U` while every rendition underneath is a 404. And a
+stream that plays under macOS curl proves nothing either: `live4.presstv.ir`
+sends a leaf certificate without its intermediate, which macOS papers over from
+its own store but Android's TrustManager refuses outright. So every candidate
+must both verify its TLS chain the way the box does and download a byte of real
+media.
 """
 
 from __future__ import annotations
@@ -71,6 +80,10 @@ OVERRIDES: dict[str, str | None] = {
 ATTR = re.compile(r'([\w-]+)="([^"]*)"')
 ATTEMPTS = 2
 
+# Reasons worth a second try: the network hiccuped. A 404 or a broken chain is
+# a verdict, not a hiccup, and retrying it only slows the build down.
+TRANSIENT = ("timeout", "error")
+
 
 @dataclass
 class Channel:
@@ -118,16 +131,55 @@ def _curl(url: str, *, body: bool = True, timeout: int = 25):
     return code.strip(), eff.strip(), payload
 
 
-def plays(url: str) -> bool:
-    """True only when a real media segment downloads from some rendition.
+_CHAIN_CACHE: dict[str, bool] = {}
 
-    A 200 on the master manifest proves nothing: the presstv.co.uk entries
-    answered 200 while every rendition underneath was a 404.
+
+def chain_complete(url: str) -> bool:
+    """True when the host sends a certificate chain a client can verify alone.
+
+    A server that sends only its leaf certificate is accepted on macOS, because
+    curl finds the intermediate in the system keychain, and rejected on Android,
+    whose TrustManager does no AIA fetching and has no such fallback. `openssl
+    s_client` against the local CA store reports exactly what the box would see:
+    return code 21 means "unable to verify the first certificate".
     """
+    scheme, _, rest = url.partition("://")
+    if scheme != "https":
+        return True
+    authority = rest.split("/")[0].split("@")[-1]
+    host, _, port = authority.partition(":")
+
+    if host in _CHAIN_CACHE:
+        return _CHAIN_CACHE[host]
+    try:
+        proc = subprocess.run(
+            ["openssl", "s_client", "-connect", f"{host}:{port or 443}",
+             "-servername", host],
+            input="", capture_output=True, text=True, timeout=30)
+        text = proc.stdout + proc.stderr
+        # No verdict line means openssl never got far enough to judge; leave the
+        # call to the HTTP probe rather than condemning a channel on that.
+        ok = "Verify return code" not in text or "Verify return code: 0 (ok)" in text
+    except (OSError, subprocess.TimeoutExpired):
+        ok = True
+    _CHAIN_CACHE[host] = ok
+    return ok
+
+
+def probe(url: str) -> tuple[bool, str]:
+    """(plays, reason). `plays` is True only when a real media segment arrives.
+
+    The chain is checked first, because a stream the box's TLS stack rejects is
+    dead no matter how happily curl fetches it here.
+    """
+    if not chain_complete(url):
+        return False, "tls: server sends no intermediate (Android refuses this)"
     try:
         code, eff, master = _curl(url)
-        if code != "200" or not master.lstrip().startswith("#EXTM3U"):
-            return False
+        if code != "200":
+            return False, f"master manifest {code}"
+        if not master.lstrip().startswith("#EXTM3U"):
+            return False, f"master manifest is not a playlist ({code})"
 
         lines = master.splitlines()
         renditions: list[tuple[int, str]] = []
@@ -151,26 +203,32 @@ def plays(url: str) -> bool:
                 if vcode == "200" and vbody.lstrip().startswith("#EXTM3U"):
                     candidates.append((_bw, veff, vbody))
 
+        if not candidates:
+            return False, f"every rendition 404s under {eff}"
+
         for _bw, base, body in candidates:
             seg = next((l for l in body.splitlines() if is_uri(l)), None)
             if not seg:
-                continue
+                return False, "playlist names no segment"
             segurl = urllib.parse.urljoin(base, seg)
             scode, _, _ = _curl(segurl, body=False)
             if scode == "200":
-                return True
-        return False
-    except (subprocess.TimeoutExpired, OSError, ValueError):
-        return False
+                return True, "ok"
+        return False, "no segment downloads"
+    except subprocess.TimeoutExpired:
+        return False, "timeout"
+    except (OSError, ValueError) as exc:
+        return False, f"error: {exc}" if str(exc) else "error"
 
 
-def plays_after_retries(url: str) -> bool:
-    for attempt in range(ATTEMPTS):
-        if plays(url):
-            return True
-        if attempt + 1 < ATTEMPTS:
-            time.sleep(3)
-    return False
+def probe_after_retries(url: str) -> tuple[bool, str]:
+    ok, reason = probe(url)
+    for attempt in range(1, ATTEMPTS):
+        if ok or not any(word in reason for word in TRANSIENT):
+            break
+        time.sleep(3)
+        ok, reason = probe(url)
+    return ok, reason
 
 
 def main() -> int:
@@ -191,14 +249,14 @@ def main() -> int:
 
     print(f"probing {len(kept)} channels end to end")
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-        alive = list(pool.map(lambda c: plays_after_retries(c.url), kept))
+        results = list(pool.map(lambda c: probe_after_retries(c.url), kept))
 
     final = []
-    for ch, ok in zip(kept, alive):
+    for ch, (ok, reason) in zip(kept, results):
         if ok:
             final.append(ch)
         else:
-            print(f"  drop   {ch.name} (no segment from {ch.url})")
+            print(f"  drop   {ch.name} ({reason})")
 
     if len(final) < FLOOR:
         print(f"REFUSING to write: only {len(final)} channels alive", file=sys.stderr)
