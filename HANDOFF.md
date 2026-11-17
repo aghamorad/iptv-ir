@@ -39,9 +39,16 @@ without a human in the loop. Source of truth is Free-TV/IPTV's Iran list.
 
 * 19 of the 20 channels pull real h264 video from this Mac, on the same network
   as the box, via `ffprobe` (2026-11-17). All 20 are `ncdn.telewebion.ir`.
+  (The 20th, Press TV French, is the one dropped above; ffprobe's TLS error on
+  it is the Homebrew OpenSSL build having no bundle for TrustAsia, not a fault
+  in the stream.)
 * The box fetched the playlist in 486 ms and parsed it — raw.githubusercontent.com
   resolves to 185.199.110.133 at ~74 ms from the box's own network, so the
   hosting choice is not a problem from Iran.
+* The box actually plays it: MyTV's log shows `首次启动，选择第一个频道: IRIB TV1`
+  handing `ncdn.telewebion.ir/tv1/...` to Media3, `PlayerActivity` and its
+  `SurfaceView` resumed, wlan0 at ~3.5 Mbit/s, and a zap trail of
+  `tv1 → presstv → tv2`.
 * The GitHub Action is green and its output is byte-identical to a local build.
 
 ## Open issues
