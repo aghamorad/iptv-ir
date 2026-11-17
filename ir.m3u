@@ -39,5 +39,3 @@ https://ncdn.telewebion.ir/ifilm/live/playlist.m3u8
 https://ncdn.telewebion.ir/faratar/live/playlist.m3u8
 #EXTINF:-1 tvg-id="PressTV.ir" tvg-name="Press TV" tvg-logo="https://i.imgur.com/X3YP2Gg.png" tvg-chno="20" group-title="Iran",Press TV
 https://ncdn.telewebion.ir/presstv/live/playlist.m3u8
-#EXTINF:-1 tvg-id="PressTVFrench.ir" tvg-name="Press TV French" tvg-logo="https://i.imgur.com/X3YP2Gg.png" tvg-chno="21" group-title="Iran",Press TV French
-https://live4.presstv.ir/live/smil:presstvfr.smil/playlist.m3u8
